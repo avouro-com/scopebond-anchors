@@ -1,0 +1,89 @@
+# Publishes each finished UTC day's signed evidence-chain heads from Scopebond Cloud's public
+# `GET /v1/anchors/:date` as anchors/YYYY/MM/DD.json. Append-only: a day already published is never
+# rewritten, and a different list for it fails the run. The list holds salted anchor ids, sequence
+# numbers and segment digests only — no workspace data.
+name: Publish anchors
+
+on:
+  schedule:
+    - cron: "20 0 * * *" # after midnight UTC, once yesterday is complete
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "UTC day to publish (YYYY-MM-DD); empty means yesterday"
+        required: false
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: publish-anchors
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # commit the day's file to this repository
+    env:
+      ANCHORS_ORIGIN: https://cloud.scopebond.com
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Choose the day
+        id: day
+        env:
+          INPUT_DATE: ${{ inputs.date }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          day="${INPUT_DATE:-}"
+          if [ -z "$day" ]; then day="$(date -u -d 'yesterday' +%Y-%m-%d)"; fi
+          if ! [[ "$day" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then echo "::error::date must be YYYY-MM-DD"; exit 1; fi
+          if [ "$day" \> "$(date -u -d 'yesterday' +%Y-%m-%d)" ]; then echo "::error::only a finished UTC day is published"; exit 1; fi
+          echo "day=$day" >> "$GITHUB_OUTPUT"
+          echo "path=anchors/${day:0:4}/${day:5:2}/${day:8:2}.json" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the day's anchors
+        env:
+          DAY: ${{ steps.day.outputs.day }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 60 --retry 3 --retry-delay 10 \
+            -H "accept: application/json" "$ANCHORS_ORIGIN/v1/anchors/$DAY" -o "$RUNNER_TEMP/anchors.json"
+          # The list must be what the route promises: this day, a list of heads, nothing else at the top level.
+          node -e '
+            const doc = JSON.parse(require("node:fs").readFileSync(process.env.RUNNER_TEMP + "/anchors.json", "utf8"));
+            const keys = Object.keys(doc).sort().join(",");
+            if (keys !== "date,heads,key,signature,signed,type,version") throw new Error("unexpected members: " + keys);
+            if (doc.type !== "scopebond:chain-anchors" || doc.version !== 1 || doc.date !== process.env.DAY || !Array.isArray(doc.heads)) throw new Error("not the anchor list for this day");
+            for (const h of doc.heads) {
+              if (Object.keys(h.head).sort().join(",") !== "anchor_id,ingest_seq,issued_at,segment,type,version") throw new Error("a head carries unexpected members");
+              if (!/^[0-9a-f]{64}$/.test(h.head.anchor_id)) throw new Error("an anchor id is not a hash");
+            }
+            console.log(`${doc.heads.length} chain head(s) for ${doc.date}; ${doc.signed ? "signed by " + doc.key.kid : "unsigned"}`);
+          '
+
+      - name: Commit the day
+        env:
+          DAY: ${{ steps.day.outputs.day }}
+          FILE: ${{ steps.day.outputs.path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "$FILE" ]; then
+            if cmp -s "$FILE" "$RUNNER_TEMP/anchors.json"; then echo "$FILE is already published with these bytes"; exit 0; fi
+            echo "::error::$FILE is already published with different content; the log is append-only and is not rewritten"
+            exit 1
+          fi
+          mkdir -p "$(dirname "$FILE")"
+          cp "$RUNNER_TEMP/anchors.json" "$FILE"
+          git config user.name "scopebond-anchors"
+          git config user.email "scopebond@avouro.com"
+          git add "$FILE"
+          git commit --quiet -m "anchors: $DAY"
+          git push --quiet origin HEAD
+          echo "published $FILE"
