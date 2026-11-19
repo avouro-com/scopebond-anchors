@@ -1,0 +1,1 @@
+{"type":"scopebond:chain-anchors","version":1,"date":"2026-11-18","key":{"alg":"Ed25519","kid":"seg_7c0321c3a46739d0","public_key_spki":"MCowBQYDK2VwAyEAgZlo6iRUFF7Qos0maiIGKVJhJ9x0ZuMHn2ysDH9VBDQ="},"heads":[],"signed":true,"signature":{"alg":"Ed25519","kid":"seg_7c0321c3a46739d0","sig":"wrpqXIPdGtwyqpFAC5Fp+1Gr7v5LQHai+yDY91XnvhAjeLwO+s2caa8vxcPQZvmfbuYCrGDo2LbwWMwQh7/oDg=="}}
